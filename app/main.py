@@ -147,7 +147,7 @@ def render_sidebar(config: Config) -> dict:
         st.markdown("### Retrieval Parameters")
 
         num_papers = st.slider(
-            "Number of papers to retrieve",
+            "Number of papers to fetch from PubMed",
             min_value=3,
             max_value=30,
             value=config.DEFAULT_NUM_PAPERS,
