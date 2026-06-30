@@ -108,7 +108,7 @@ def _load_config() -> Config:
         st.stop()
     
 @st.cache_resource(
-    show spinner = "🧬  Loading PubMedBERT embedding model (first run takes ~30s)…"
+    show_spinner = "🧬  Loading PubMedBERT embedding model (first run takes ~30s)…"
 )
 
 def _load_pipeline(_config: Config) -> PubMedRAGPipeline:
@@ -152,9 +152,140 @@ def render_sidebar(config: Config) -> dict:
             max_value=30,
             value=config.DEFAULT_NUM_PAPERS,
             step=1,
-            help=
+            help=(
             "How many papers to pull from PubMed. "
             "More papers = richer context but longer index build time."
+        ),
         )
 
-        
+    st.markdown("**Publication Year Range")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        year_start = st.number_input(
+                "From", min_value=1990, max_value=2026, value=2019, step=1
+            )
+    with col_b:
+        year_end = st.number_input(
+                "To", min_value=1990, max_value=2026, value=2026, step=1
+            )
+
+    
+    st.divider()
+
+    st.markdown("### RAG Parameters")
+
+    top_k = st.slider(
+        "Number of top papers to retrieve for RAG",
+        min_value=2,
+        max_value=15,
+        value=config.DEFAULT_TOP_K,
+        step=1,
+        help=(
+            "How many papers to retrieve from the index for RAG. "
+            "More papers = richer context but longer response time."
+        ),
+    )
+
+    rerank_top_n = st.slider(
+        "Rerank Top-N (FlashRank)",
+            min_value=1,
+            max_value=min(top_k, 5),
+            value=min(config.DEFAULT_RERANK_TOP_N, top_k),
+            help=(
+                "Documents kept after FlashRank cross-encoder reranking. "
+                "These are the final contexts passed to Claude."
+        ),
+    )
+    st.divider()
+
+    run_evaluation = st.checkbox(
+        "🧪 Run RAG evaluation",
+            value=False,
+            help=(
+                "Evaluate faithfulness, answer relevance, and context precision "
+                "using Claude as the judge. Requires 3 additional API calls."
+        ),
+    )
+
+    st.divider()
+
+    st.markdown("### System Configuration")
+    st.caption(f"LLM: `{config.LLM_MODEL}`")
+    st.caption(f"Embed: `{config.EMBEDDING_MODEL.split('/')[-1]}`")
+    st.caption("Reranker: `FlashRank`")
+    st.caption("VectorDB: `Qdrant (in-memory)`")
+
+    return {
+        "num_papers": num_papers,
+        "year_start": int(year_start),
+        "year_end": int(year_end),
+        "top_k": top_k,
+        "rerank_top_n": rerank_top_n,
+        "run_evaluation": run_evaluation,
+    }
+
+# Components Renderers:
+
+def render_paper_card(paper: PubMedPaper, idx: int) -> None:
+    """Render a single PubMed paper as a styled HTML card."""
+    st.markdown(
+        f"""<div class="paper-card">
+<strong>{idx}. <a href="{paper.url}" target="_blank" rel="noopener">{paper.title}</a></strong><br>
+<small>{paper.authors_display}</small><br>
+<small><em>{paper.journal}</em> &nbsp;|&nbsp; {paper.year} &nbsp;|&nbsp; PMID&nbsp;{paper.pmid}</small>
+</div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def render_eval_panel(result: EvaluationResult) -> None:
+    """Render evaluation metric cards and reasoning detail."""
+    st.markdown("### RAG Evaluation")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    def _delta_label(score: float) -> str:
+        if score >= 0.75:
+            return "Good"
+        if score >= 0.50:
+            return "Fair"
+        return "Needs work"
+
+    with col1:
+        st.metric(
+            "Faithfulness",
+            f"{result.faithfulness:.2f}",
+            _delta_label(result.faithfulness),
+            help="Are all answer claims grounded in the retrieved context?",
+        )
+    with col2:
+        st.metric(
+            "Answer Relevance",
+            f"{result.answer_relevance:.2f}",
+            _delta_label(result.answer_relevance),
+            help="Does the answer address the research question?",
+        )
+    with col3:
+        st.metric(
+            "Context Precision",
+            f"{result.context_precision:.2f}",
+            _delta_label(result.context_precision),
+            help="Are the retrieved documents topically relevant?",
+        )
+    with col4:
+        st.metric(
+            "Overall",
+            f"{result.overall_score:.2f}",
+            f"Grade: {result.grade}",
+            help="Weighted score (faithfulness 40%, relevance 40%, precision 20%).",
+        )
+
+    with st.expander("Evaluation reasoning"):
+        st.markdown(f"**Faithfulness:** {result.faithfulness_reasoning}")
+        st.markdown(f"**Answer Relevance:** {result.relevance_reasoning}")
+        st.markdown(f"**Context Precision:** {result.precision_reasoning}")
+
+        if result.unsupported_claims:
+            st.markdown("**Claims not supported by context:**")
+            for claim in result.unsupported_claims:
+                st.markdown(f"- _{claim}_")
