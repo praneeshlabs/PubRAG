@@ -289,3 +289,291 @@ def render_eval_panel(result: EvaluationResult) -> None:
             st.markdown("**Claims not supported by context:**")
             for claim in result.unsupported_claims:
                 st.markdown(f"- _{claim}_")
+
+# main:
+
+def main() -> None:
+    """Application entry point."""
+
+    # ── Header ───────────────────────────────────────────────────────────────
+    st.markdown(
+        """
+<div class="rag-header">
+    <h1>🔬 PubMed RAG Research Assistant</h1>
+    <p>Real-time biomedical literature synthesis &nbsp;·&nbsp;
+       PubMedBERT&nbsp;embeddings&nbsp;→&nbsp;FlashRank&nbsp;reranking&nbsp;→&nbsp;Claude&nbsp;synthesis</p>
+    <p>Query expansion via MeSH terms &nbsp;·&nbsp; Strict inline citations &nbsp;·&nbsp;
+       Qdrant vector search</p>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    # ── Load shared resources ─────────────────────────────────────────────────
+    config = _load_config()
+    pipeline = _load_pipeline(config)
+    fetcher = PubMedFetcher(config=config)
+
+    # ── Sidebar ───────────────────────────────────────────────────────────────
+    params = render_sidebar(config)
+
+    # ── Search input ──────────────────────────────────────────────────────────
+    st.markdown("## 🔍 Research Question")
+
+    query = st.text_area(
+        label="Enter your biomedical research question:",
+        placeholder=(
+            "e.g., What are the molecular mechanisms underlying CRISPR-Cas9 "
+            "off-target effects, and what strategies have been developed to "
+            "minimise them for therapeutic applications?"
+        ),
+        height=110,
+        key="query_input",
+        help="Ask any biotechnology or biomedical research question.",
+    )
+
+    col_search, col_clear, _ = st.columns([2, 1, 4])
+    with col_search:
+        search_clicked = st.button(
+            "🚀  Search & Synthesise",
+            type="primary",
+            use_container_width=True,
+        )
+    with col_clear:
+        clear_clicked = st.button("🗑️  Clear", use_container_width=True)
+
+    if clear_clicked:
+        for key in ("rag_result", "rag_papers", "rag_query", "expanded_query"):
+            st.session_state.pop(key, None)
+        st.rerun()
+
+    # ── Pipeline execution ────────────────────────────────────────────────────
+    if search_clicked:
+        _query = query.strip()
+        if not _query:
+            st.warning("⚠️  Please enter a research question before searching.")
+            st.stop()
+
+        if params["year_start"] > params["year_end"]:
+            st.error("❌  Start year must not exceed end year.")
+            st.stop()
+
+        st.divider()
+
+        # ── Step 1: MeSH query expansion ─────────────────────────────────────
+        expanded_query: str = _query
+        with st.status(
+            "🧠  Step 1 / 4 — Expanding query with MeSH terms…", expanded=True
+        ) as step1:
+            try:
+                st.write(
+                    "Sending your question to Claude to identify optimal "
+                    "MeSH (Medical Subject Headings) terms and build a "
+                    "high-recall PubMed boolean search string…"
+                )
+                expanded_query = fetcher.expand_query_with_mesh(_query)
+                st.write(f"✅  MeSH expansion complete.")
+                step1.update(
+                    label="✅  Step 1 / 4 — Query expanded with MeSH terms",
+                    state="complete",
+                )
+            except Exception as exc:
+                step1.update(
+                    label=f"❌  Step 1 / 4 — Query expansion error: {exc}",
+                    state="error",
+                )
+                st.error(f"MeSH expansion failed: {exc}")
+                st.stop()
+
+        # Show expanded query (collapsible)
+        with st.expander("🔍  Expanded PubMed search string", expanded=False):
+            st.code(expanded_query, language="text")
+
+        # ── Step 2: PubMed fetch ──────────────────────────────────────────────
+        papers: list[PubMedPaper] = []
+        with st.status(
+            "📚  Step 2 / 4 — Fetching papers from PubMed…", expanded=True
+        ) as step2:
+            try:
+                st.write(
+                    f"Querying NCBI PubMed for up to **{params['num_papers']}** papers "
+                    f"published between **{params['year_start']}** and **{params['year_end']}**…"
+                )
+                pmid_list = fetcher.search_pubmed(
+                    query=expanded_query,
+                    num_papers=params["num_papers"],
+                    year_start=params["year_start"],
+                    year_end=params["year_end"],
+                )
+
+                if not pmid_list:
+                    step2.update(
+                        label="⚠️  Step 2 / 4 — No results found",
+                        state="error",
+                    )
+                    st.warning(
+                        "PubMed returned no results for this query and year range. "
+                        "Try broadening your question or adjusting the year filter."
+                    )
+                    st.stop()
+
+                st.write(f"Found **{len(pmid_list)}** matching PMIDs. Fetching full records…")
+                papers = fetcher.fetch_papers(pmid_list)
+
+                if not papers:
+                    step2.update(
+                        label="⚠️  Step 2 / 4 — No papers with abstracts found",
+                        state="error",
+                    )
+                    st.warning(
+                        "All retrieved papers lack abstracts. "
+                        "Try a different query or broader year range."
+                    )
+                    st.stop()
+
+                st.write(
+                    f"✅  **{len(papers)}** papers with abstracts retrieved "
+                    f"({len(pmid_list) - len(papers)} skipped — no abstract)."
+                )
+                step2.update(
+                    label=f"✅  Step 2 / 4 — {len(papers)} papers fetched from PubMed",
+                    state="complete",
+                )
+            except RuntimeError as exc:
+                step2.update(
+                    label=f"❌  Step 2 / 4 — PubMed error: {exc}",
+                    state="error",
+                )
+                st.error(str(exc))
+                st.stop()
+
+        # ── Step 3: Build vector index & rerank ───────────────────────────────
+        with st.status(
+            "⚡  Step 3 / 4 — Building vector index & setting up FlashRank…",
+            expanded=True,
+        ) as step3:
+            st.write(
+                f"Embedding **{len(papers)}** abstracts with "
+                f"`{config.EMBEDDING_MODEL.split('/')[-1]}` (PubMedBERT)…"
+            )
+            st.write(
+                f"Configuring FlashRank cross-encoder to rerank top-**{params['top_k']}** "
+                f"→ top-**{params['rerank_top_n']}** contexts…"
+            )
+            # Index is built inside pipeline.query(); we surface this step for UX clarity.
+            step3.update(
+                label=(
+                    f"✅  Step 3 / 4 — Qdrant index configured "
+                    f"(top-{params['top_k']} → FlashRank → top-{params['rerank_top_n']})"
+                ),
+                state="complete",
+            )
+
+        # ── Step 4: RAG synthesis ─────────────────────────────────────────────
+        rag_result: RAGResponse | None = None
+        with st.status(
+            "✍️  Step 4 / 4 — Synthesising answer with Claude…", expanded=True
+        ) as step4:
+            try:
+                st.write(
+                    f"Running PubMedBERT similarity search → FlashRank → "
+                    f"Claude (`{config.LLM_MODEL}`) with strict citation constraints…"
+                )
+                rag_result = pipeline.query(
+                    question=_query,
+                    papers=papers,
+                    top_k=params["top_k"],
+                    rerank_top_n=params["rerank_top_n"],
+                )
+                step4.update(
+                    label="✅  Step 4 / 4 — Synthesis complete!",
+                    state="complete",
+                )
+            except (RuntimeError, ValueError) as exc:
+                step4.update(
+                    label=f"❌  Step 4 / 4 — Synthesis failed: {exc}",
+                    state="error",
+                )
+                st.error(str(exc))
+                st.exception(exc)
+                st.stop()
+
+        # Persist to session state so result survives reruns
+        st.session_state["rag_result"] = rag_result
+        st.session_state["rag_papers"] = papers
+        st.session_state["rag_query"] = _query
+        st.session_state["expanded_query"] = expanded_query
+
+    # ── Display results (persists across reruns via session state) ────────────
+    if "rag_result" in st.session_state and st.session_state["rag_result"]:
+        rag_result: RAGResponse = st.session_state["rag_result"]
+        papers: list[PubMedPaper] = st.session_state.get("rag_papers", [])
+        stored_query: str = st.session_state.get("rag_query", "")
+        params_current = params  # use sidebar params for optional evaluation
+
+        st.divider()
+
+        # ── Synthesis answer ──────────────────────────────────────────────────
+        st.markdown("## 📝 Synthesised Research Summary")
+        st.markdown(rag_result.answer)
+
+        # Metadata ribbon
+        meta = rag_result.metadata
+        st.caption(
+            f"📊 Based on **{meta.get('num_input_papers', '?')}** papers &nbsp;·&nbsp; "
+            f"Retrieved top-**{meta.get('top_k', '?')}** &nbsp;·&nbsp; "
+            f"Reranked to top-**{meta.get('rerank_top_n', '?')}** &nbsp;·&nbsp; "
+            f"Model: `{meta.get('llm_model', '?')}`"
+        )
+
+        st.divider()
+
+        # ── Source papers expander ────────────────────────────────────────────
+        with st.expander(
+            f"📚  Analysed papers — {len(papers)} retrieved from PubMed",
+            expanded=False,
+        ):
+            st.markdown(
+                "*All papers retrieved and indexed for this synthesis. "
+                "Click any title to open the full record on PubMed.*"
+            )
+            for i, paper in enumerate(papers, start=1):
+                render_paper_card(paper, i)
+
+        # ── Optional evaluation panel ─────────────────────────────────────────
+        if params_current.get("run_evaluation") and papers:
+            st.divider()
+            with st.status("🧪  Running RAG evaluation…", expanded=True) as eval_status:
+                try:
+                    evaluator = RAGEvaluator(config=config)
+                    contexts = [
+                        f"Title: {p.title}\n\nAbstract: {p.abstract}"
+                        for p in papers[:5]
+                    ]
+                    eval_result = evaluator.evaluate(
+                        question=stored_query,
+                        answer=rag_result.answer,
+                        contexts=contexts,
+                    )
+                    eval_status.update(
+                        label="✅  Evaluation complete!", state="complete"
+                    )
+                    render_eval_panel(eval_result)
+                except Exception as exc:
+                    eval_status.update(
+                        label=f"❌  Evaluation failed: {exc}", state="error"
+                    )
+                    st.error(f"Evaluation error: {exc}")
+
+    # ── Footer ────────────────────────────────────────────────────────────────
+    st.divider()
+    st.caption(
+        "🔬 PubMed RAG Research Assistant &nbsp;·&nbsp; "
+        "Data sourced from NCBI PubMed (real-time) &nbsp;·&nbsp; "
+        "**Not for clinical decision-making** &nbsp;·&nbsp; "
+        "Always verify findings with the primary literature."
+    )
+
+
+if __name__ == "__main__":
+    main()
