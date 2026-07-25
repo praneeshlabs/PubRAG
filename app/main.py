@@ -295,7 +295,7 @@ def render_eval_panel(result: EvaluationResult) -> None:
 def main() -> None:
     """Application entry point."""
 
-    # ── Header ───────────────────────────────────────────────────────────────
+    # Header 
     st.markdown(
         """
 <div class="rag-header">
@@ -309,15 +309,15 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    # ── Load shared resources ─────────────────────────────────────────────────
+    # Load shared resources
     config = _load_config()
     pipeline = _load_pipeline(config)
     fetcher = PubMedFetcher(config=config)
 
-    # ── Sidebar ───────────────────────────────────────────────────────────────
+    # Sidebar
     params = render_sidebar(config)
 
-    # ── Search input ──────────────────────────────────────────────────────────
+    # Search input 
     st.markdown("## 🔍 Research Question")
 
     query = st.text_area(
@@ -347,7 +347,7 @@ def main() -> None:
             st.session_state.pop(key, None)
         st.rerun()
 
-    # ── Pipeline execution ────────────────────────────────────────────────────
+    # Pipeline execution
     if search_clicked:
         _query = query.strip()
         if not _query:
@@ -360,7 +360,7 @@ def main() -> None:
 
         st.divider()
 
-        # ── Step 1: MeSH query expansion ─────────────────────────────────────
+        # Step 1: MeSH query expansion
         expanded_query: str = _query
         with st.status(
             "🧠  Step 1 / 4 — Expanding query with MeSH terms…", expanded=True
@@ -389,7 +389,7 @@ def main() -> None:
         with st.expander("🔍  Expanded PubMed search string", expanded=False):
             st.code(expanded_query, language="text")
 
-        # ── Step 2: PubMed fetch ──────────────────────────────────────────────
+        # Step 2: PubMed fetch 
         papers: list[PubMedPaper] = []
         with st.status(
             "📚  Step 2 / 4 — Fetching papers from PubMed…", expanded=True
@@ -447,7 +447,7 @@ def main() -> None:
                 st.error(str(exc))
                 st.stop()
 
-        # ── Step 3: Build vector index & rerank ───────────────────────────────
+        # Step 3: Build vector index & rerank
         with st.status(
             "⚡  Step 3 / 4 — Building vector index & setting up FlashRank…",
             expanded=True,
@@ -469,7 +469,7 @@ def main() -> None:
                 state="complete",
             )
 
-        # ── Step 4: RAG synthesis ─────────────────────────────────────────────
+        # Step 4: RAG synthesis
         rag_result: RAGResponse | None = None
         with st.status(
             "✍️  Step 4 / 4 — Synthesising answer with Claude…", expanded=True
@@ -504,7 +504,7 @@ def main() -> None:
         st.session_state["rag_query"] = _query
         st.session_state["expanded_query"] = expanded_query
 
-    # ── Display results (persists across reruns via session state) ────────────
+    # Display results (persists across reruns via session state)
     if "rag_result" in st.session_state and st.session_state["rag_result"]:
         rag_result: RAGResponse = st.session_state["rag_result"]
         papers: list[PubMedPaper] = st.session_state.get("rag_papers", [])
@@ -513,7 +513,7 @@ def main() -> None:
 
         st.divider()
 
-        # ── Synthesis answer ──────────────────────────────────────────────────
+        # Synthesis answer 
         st.markdown("## 📝 Synthesised Research Summary")
         st.markdown(rag_result.answer)
 
@@ -528,7 +528,7 @@ def main() -> None:
 
         st.divider()
 
-        # ── Source papers expander ────────────────────────────────────────────
+        # Source papers expander
         with st.expander(
             f"📚  Analysed papers — {len(papers)} retrieved from PubMed",
             expanded=False,
@@ -540,7 +540,7 @@ def main() -> None:
             for i, paper in enumerate(papers, start=1):
                 render_paper_card(paper, i)
 
-        # ── Optional evaluation panel ─────────────────────────────────────────
+        # Optional evaluation panel
         if params_current.get("run_evaluation") and papers:
             st.divider()
             with st.status("🧪  Running RAG evaluation…", expanded=True) as eval_status:
@@ -565,7 +565,7 @@ def main() -> None:
                     )
                     st.error(f"Evaluation error: {exc}")
 
-    # ── Footer ────────────────────────────────────────────────────────────────
+    # Footer
     st.divider()
     st.caption(
         "🔬 PubMed RAG Research Assistant &nbsp;·&nbsp; "
